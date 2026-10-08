@@ -51,27 +51,65 @@
 #define DC_BUS_OVP_THRESHOLD_MV 60000 // Próg przepięcia: 60.00 V
 #define DC_BUS_OCP_THRESHOLD_MA 50000 // Próg nadprądowy: 50.00 A (na przyszłość)
 
+
+/* Definicje stałych czasowych dla sygnalizacji LED */
+#define LED_BLINK_ON_TIME_MS (250U) /* Czas włączenia diody w serii (ang. pulse ON time) */
+#define LED_BLINK_OFF_TIME_MS (250U) /* Czas wyłączenia diody w serii (ang. pulse OFF time) */
+#define LED_GROUP_PAUSE_TIME_MS (1500U) /* Czas pauzy między grupami błysków (ang. inter-sequence pause) */
+#define LED_WARN_TOGGLE_TIME_MS (500U) /* Czas przełączenia dla ostrzeżeń (ang. warning toggle time - 1 Hz, 50% duty) */
+
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 
-//------------------------------------------------------------------------ DIAGNOSTYKA I BŁĘDY (Styl ST MC SDK)
-#define FAULT_NONE              	((uint16_t)0x0000)
-#define FAULT_OVER_CURR         	((uint16_t)0x0001)
-#define FAULT_OVER_VOLT         	((uint16_t)0x0002)
-#define FAULT_PRECHARGE_TIMEOUT 	((uint16_t)0x0004)
-#define FAULT_SDC_FEEDBACK      	((uint16_t)0x0008)
-// [...]
-#define FAULT_CORDIC_FLAG_TIMEOUT	((uint16_t)0x0010)
+//--------------------------------------------------------------------- DIAGNOSTYKA I BŁĘDY (standard MISRA C)
 
-volatile uint16_t Active_Faults = FAULT_NONE; // Globalny rejestr usterkowy
+// MASKI BŁĘDÓW KRYTYCZNYCH
+typedef enum {
+	CRIT_FAULT_NONE              	= 0U,
+	CRIT_FAULT_OVER_CURR         	= (1U << 0),
+	CRIT_FAULT_OVER_VOLT         	= (1U << 1),
+	CRIT_FAULT_PRECHARGE_TIMEOUT 	= (1U << 2),
+	CRIT_FAULT_SDC_FEEDBACK      	= (1U << 3),
+	// [...]
+	CRIT_FAULT_CORDIC_FLAG_TIMEOUT	= (1U << 4)
+} CritFaultType_t;
+
+/* Grupy błędów krytycznych (ang. critical fault groups) */
+#define CRIT_GROUP_POWER_STAGE ((uint32_t)CRIT_FAULT_OVER_CURR | (uint32_t)CRIT_FAULT_OVER_VOLT)
+#define CRIT_GROUP_SAFETY_HW ((uint32_t)CRIT_FAULT_PRECHARGE_TIMEOUT | (uint32_t)CRIT_FAULT_SDC_FEEDBACK)
+#define CRIT_GROUP_DIGITAL_PERIPH ((uint32_t)CRIT_FAULT_CORDIC_FLAG_TIMEOUT)
+
+#define BLINK_COUNT_GROUP_1 (2U) /* Grupa 1: Stopień mocy (OCP/OVP) - 2 błyski */
+#define BLINK_COUNT_GROUP_2 (3U) /* Grupa 2: Układy pomocnicze (Precharge/SDC) - 3 błyski */
+#define BLINK_COUNT_GROUP_3 (4U) /* Grupa 3: Koprocesor cyfrowy (CORDIC) - 4 błyski */
+#define BLINK_COUNT_DEFAULT (2U)
+
+// MASKI OSTRZEŻEŃ
+typedef enum {
+	WARNING_NONE              		= 0U,
+	// [...]
+} WarningType_t;
+
+// STRUKTURA REJESTRÓW BŁĘDÓW SYSTEMOWYCH
+typedef struct {
+	volatile uint32_t Critical_faults; // Globalny rejestr błędów krytycznych
+	volatile uint32_t Warnings; // Globalny rejestr ostrzeżeń
+} SystemFaults_t;
+
+// Deklaracja i inicjalizacja zmiennej globalnej:
+volatile SystemFaults_t Active_faults = {
+	.Critical_faults = CRIT_FAULT_NONE,
+	.Warnings = WARNING_NONE
+};
 
 // Status wykonania samej powłoki funkcji
 typedef enum {
     	EXEC_SUCCESS = 0,
     	EXEC_ERROR
-} FuncStatus;
+} FuncStatus_t;
 
 /* USER CODE END PM */
 
@@ -91,7 +129,7 @@ typedef enum {
     	ADC1_ACTIVE_CH_NUM
 } ADC1_measurements;
 
-uint8_t current_adc1_measurement;
+volatile uint8_t current_adc1_measurement;
 volatile int32_t ADC1_buff[ADC1_ACTIVE_CH_NUM];
 
 
@@ -106,23 +144,23 @@ typedef enum {
     	PH2_I_SENS_N 	//
 } ADC2_measurements;
 
-uint8_t current_adc2_measurement;
+volatile uint8_t current_adc2_measurement;
 volatile int32_t ADC2_buff[ADC2_ACTIVE_CH_NUM];
 // ADC2_buff jest asynchronicznie odświeżany w przerwaniu ADC2_IRQHandler
 
 
-// Zmienne do sprzętowego SPWM ----------------------------------------------------------|
-uint32_t phase_acc = 0;         // Akumulator fazy (od 0 do 0xFFFFFFFF)
-uint32_t phase_step = 0;        // Wyliczyne w main()
-// ====================================================================
-float spwm_freq_hz = 50.0f;      // <--- ZMIANA CZĘSTOTLIWOŚCI (1.0 -> 1Hz)
-float mod_index = 0.82f;         // <--- ZMIANA AMPLITUDY (0.1 -> 10%)
-// ====================================================================
-uint16_t tim1_arr_value = 0;         // Zmienna przechowująca maksymalne wypełnienie
+// Zmienne do sprzętowego SPWM -------------------------------------------------------------------|
+uint32_t phase_acc = 0;         			// Akumulator fazy (od 0 do 0xFFFFFFFF)
+uint32_t phase_step = 0;        			// Wyliczyne w main()
 
+// ===============================================================================================|
+float spwm_freq_hz = 50.0f;     	// <--- ZMIANA CZĘSTOTLIWOŚCI (1.0 -> 1Hz)
+volatile float mod_index = 0.82f;        	// <--- ZMIANA AMPLITUDY (0.1 -> 10%)
+// ===============================================================================================|
 
-// Zmienna do procedury soft start ---------------------------------------------------------------|
-float soft_start_end_index = 0.0f;
+uint16_t tim1_arr_value = 0;        	 	// Zmienna przechowująca maksymalne wypełnienie
+
+volatile float soft_start_end_index = 0.0f;			// Zmienna do procedury soft start
 
 
 // TESTOWANIE POMIARÓW ADC:
@@ -137,6 +175,7 @@ float soft_start_end_index = 0.0f;
 	  //int32_t Pomiar_napiecia_FAZA3 = 0;
 	  int32_t Pomiar_temp_stopnia_mocy = 0;
 
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -150,13 +189,23 @@ static void MX_TIM7_Init(void);
 /* USER CODE BEGIN PFP */
 
 //------------------------------------------------------------------------ PROTOTYPY FUNKCJI
-FuncStatus Inverter_startup_procedure(void);
-FuncStatus DC_BUS_charge_monitor(void);
-FuncStatus Check_OCP_status(void);
-FuncStatus Check_OVP_status(void);
+FuncStatus_t Inverter_startup_procedure(void);
+FuncStatus_t DC_BUS_charge_monitor(void);
+FuncStatus_t Check_OCP_status(void);
+FuncStatus_t Check_OVP_status(void);
+
 int32_t adc1_2val(ADC1_measurements adc1_meas);
 int32_t adc2_2val(ADC2_measurements adc2_meas);
+
 void Enable_PWM_signals(void);
+static inline float CORDIC_sinf(uint32_t angle);
+
+void Process_Status_LED(void);
+uint8_t Get_crit_flt_blink_count(CritFaultType_t faults);
+void Warning_handler(WarningType_t warning_type);
+void Warning_clear_handler(WarningType_t warning_type);
+void Critical_fault_handler(CritFaultType_t fault_type);
+void Critical_fault_loop(void);
 
 void TIM1_UP_TIM16_IRQHandler(void);
 void ADC1_2_IRQHandler(void);
@@ -274,7 +323,7 @@ int main(void)
 
 
     /* TEST PROCEDURY STARTOWEJ BARE-METAL */
-    if (Inverter_startup_procedure() == EXEC_ERROR) //<---------------------------------- EXEC_ERROR -> [DEBUG ONLY]
+    if (Inverter_startup_procedure() == EXEC_SUCCESS) //<---------------------------------- EXEC_ERROR -> [DEBUG ONLY]
     {
     	// 0. Start poprawny - zapalenie zielonego LEDa testowego
         HAL_GPIO_WritePin(GPIOB, STATUS_LED_Pin, GPIO_PIN_SET);
@@ -282,7 +331,7 @@ int main(void)
         // 1. Wyczyszczenie sprzętowej flagi Break (BIF), która zatrzasnęła się
         // podczas startu mikrokontrolera z powodu domyślnego stanu 0 na przerzutnikach OCP/OVP.
         __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_BREAK);
-        TIM1->BDTR &= ~TIM_BDTR_BKE; // Wyłączenie wejścia Break (Break Disable) -------- [DEBUG ONLY]
+        //TIM1->BDTR &= ~TIM_BDTR_BKE; // Wyłączenie wejścia Break (Break Disable) -------- [DEBUG ONLY]
 
         // 2. Włączenie timera od procedury soft startu
         HAL_TIM_Base_Start_IT(&htim7);
@@ -292,28 +341,7 @@ int main(void)
     }
     else
     {
-        // Błąd procedury - zabezpieczenie sprzętu i wystawienie sygnału błędu
-        HAL_GPIO_WritePin(GPIOA, HB_EN_n_Pin, GPIO_PIN_SET);
-        // HAL_GPIO_WritePin(GPIOB, BUZZER_Pin, GPIO_PIN_SET);
-
-
-        // Dekodowanie i obsługa błędów z rejestru bitowego
-        if (Active_Faults & FAULT_OVER_CURR)
-        {
-      	  // Logika reakcji na zadziałanie komparatora prądowego (OCP)
-        }
-        if (Active_Faults & FAULT_OVER_VOLT)
-        {
-            // Logika reakcji na przekroczenie napięcia 60V (OVP)
-        }
-        if (Active_Faults & FAULT_PRECHARGE_TIMEOUT)
-        {
-            // Logika po nieudanym naładowaniu rezystora 180R
-        }
-        if (Active_Faults & FAULT_SDC_FEEDBACK)
-        {
-            // Usterka izolatora fotowoltaicznego lub zwarcie mosfetów 'przekaźnika'
-        }
+    	Critical_fault_loop();
     }
 
   /* USER CODE END 2 */
@@ -335,6 +363,9 @@ int main(void)
 	  //Pomiar_napiecia_FAZA3
 	  Pomiar_temp_stopnia_mocy = adc1_2val(IHB_TEMP_SENS);
 
+
+	  // Dioda statusowa:
+	  Process_Status_LED();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -886,7 +917,7 @@ int32_t adc2_2val(ADC2_measurements adc2_meas)
     	}
 }
 
-FuncStatus Check_OCP_status(void)
+FuncStatus_t Check_OCP_status(void)
 {
     	// Sprawdzenie flagi ze sprzętowego przerzutnika OCP
     	if(HAL_GPIO_ReadPin(GPIOB, DC_BUS_OC_n_Pin) == GPIO_PIN_RESET)
@@ -899,14 +930,14 @@ FuncStatus Check_OCP_status(void)
 
         	if(HAL_GPIO_ReadPin(GPIOB, DC_BUS_OC_n_Pin) == GPIO_PIN_RESET)
         	{
-            		Active_Faults |= FAULT_OVER_CURR; // Ustawienie flagi w rejestrze systemowym
+        		Critical_fault_handler(CRIT_FAULT_OVER_CURR); // Ustawienie flagi w rejestrze systemowym
             		return EXEC_ERROR;                // Przerwanie wykonania z błędem
         	}
     	}
     	return EXEC_SUCCESS;
 }
 
-FuncStatus Check_OVP_status(void)
+FuncStatus_t Check_OVP_status(void)
 {
     	// 1. Sprawdzenie flagi ze sprzętowego przerzutnika OVP
     	if(HAL_GPIO_ReadPin(GPIOB, DC_BUS_OV_n_Pin) == GPIO_PIN_RESET)
@@ -919,7 +950,7 @@ FuncStatus Check_OVP_status(void)
 
         	if(HAL_GPIO_ReadPin(GPIOB, DC_BUS_OV_n_Pin) == GPIO_PIN_RESET)
         	{
-            		Active_Faults |= FAULT_OVER_VOLT;
+        		Critical_fault_handler(CRIT_FAULT_OVER_VOLT);
             		return EXEC_ERROR;
         	}
     	}
@@ -927,14 +958,14 @@ FuncStatus Check_OVP_status(void)
     	// 2. Nadmiarowe, statyczne sprawdzenie programowe odczytu ADC
     	if(adc2_2val(DC_BUS_U_SENS) > DC_BUS_OVP_THRESHOLD_MV)
     	{
-        	Active_Faults |= FAULT_OVER_VOLT;
+    		Critical_fault_handler(CRIT_FAULT_OVER_VOLT);
         	return EXEC_ERROR;
     	}
 
     	return EXEC_SUCCESS;
 }
 
-FuncStatus DC_BUS_charge_monitor(void)
+FuncStatus_t DC_BUS_charge_monitor(void)
 {
     	uint32_t start_time = HAL_GetTick();
 
@@ -948,11 +979,11 @@ FuncStatus DC_BUS_charge_monitor(void)
         	HAL_Delay(1);
     	}
 
-    	Active_Faults |= FAULT_PRECHARGE_TIMEOUT;
+    	Critical_fault_handler(CRIT_FAULT_PRECHARGE_TIMEOUT);
     	return EXEC_ERROR;
 }
 
-FuncStatus Inverter_startup_procedure(void)
+FuncStatus_t Inverter_startup_procedure(void)
 {
 		// 0. JAWNA BLOKADA BRAMEK I PODTRZYMANIE PĘTLI SDC
 		HAL_GPIO_WritePin(GPIOA, HB_EN_n_Pin, GPIO_PIN_SET);
@@ -976,7 +1007,7 @@ FuncStatus Inverter_startup_procedure(void)
     	// Sprzętowe potwierdzenie stanu przekaźnikow
     	if (HAL_GPIO_ReadPin(GPIOB, SDC_RELAY_ON_Pin) == GPIO_PIN_RESET)
     	{
-        	Active_Faults |= FAULT_SDC_FEEDBACK;
+    		Critical_fault_handler(CRIT_FAULT_SDC_FEEDBACK);
         	return EXEC_ERROR;
     	}
 
@@ -1006,11 +1037,168 @@ void Enable_PWM_signals(void)
 // Funkcja pomocnicza zlecająca sprzętowe policzenie sinusa w CORDIC
 static inline float CORDIC_sinf(uint32_t angle)
 {
+	// zmienna do kontroli czasu wykonywania sprawdzenia
+	uint32_t timeout = 1000;
+
     // Wpisanie kąta natychmiast uruchamia obliczenia w koprocesorze
     LL_CORDIC_WriteData(CORDIC, (int32_t)angle);
 
+    while (!LL_CORDIC_IsActiveFlag_RRDY(CORDIC) && (timeout > 0))
+    {
+    	--timeout;
+    }
+
+    if (timeout == 0)
+    { // Obsługa błędu koprocesora CORDIC
+    	Active_faults.Critical_faults |= CRIT_FAULT_CORDIC_FLAG_TIMEOUT;
+    	return 0.0f;
+    }
+
     // Odczyt wyniku i przeskalowanie
     return (float)((int32_t)LL_CORDIC_ReadData(CORDIC)) / 2147483648.0f;
+}
+
+uint8_t Get_crit_flt_blink_count(CritFaultType_t fault_type)
+{
+	uint8_t count = BLINK_COUNT_DEFAULT;
+
+	    if (((uint32_t)fault_type & CRIT_GROUP_POWER_STAGE) != 0U)
+	    {
+	        count = BLINK_COUNT_GROUP_1;
+	    }
+	    else if (((uint32_t)fault_type & CRIT_GROUP_SAFETY_HW) != 0U)
+	    {
+	        count = BLINK_COUNT_GROUP_2;
+	    }
+	    else if (((uint32_t)fault_type & CRIT_GROUP_DIGITAL_PERIPH) != 0U)
+	    {
+	        count = BLINK_COUNT_GROUP_3;
+	    }
+	    else
+	    {
+	        count = BLINK_COUNT_DEFAULT;
+	    }
+
+	    return count;
+}
+
+/* Nieblokująca funkcja sterowania stanem diody STATUS LED */
+void Process_Status_LED(void)
+{
+    static uint32_t last_tick = 0U;
+    static uint8_t phase = 0U;          /* 0: Błysk ON, 1: Przerwa OFF, 2: Pauza serii */
+    static uint8_t current_blink = 0U;
+
+
+    const uint32_t current_tick = HAL_GetTick();
+
+
+    /* 1. Błędy krytyczne: sekwencja błysków zależna od grupy błędów + pauza 1.5 s */
+    if (Active_faults.Critical_faults != 0U)
+    {
+        const uint8_t target_blinks = Get_crit_flt_blink_count((CritFaultType_t)Active_faults.Critical_faults);
+
+
+        if (phase == 0U)
+        {
+            HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_SET);
+            if ((current_tick - last_tick) >= LED_BLINK_ON_TIME_MS)
+            {
+                last_tick = current_tick;
+                phase = 1U;
+            }
+        }
+        else if (phase == 1U)
+        {
+            HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_RESET);
+            if ((current_tick - last_tick) >= LED_BLINK_OFF_TIME_MS)
+            {
+                last_tick = current_tick;
+                current_blink++;
+
+
+                if (current_blink >= target_blinks)
+                {
+                    current_blink = 0U;
+                    phase = 2U;
+                }
+                else
+                {
+                    phase = 0U;
+                }
+            }
+        }
+        else if (phase == 2U)
+        {
+            HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_RESET);
+            if ((current_tick - last_tick) >= LED_GROUP_PAUSE_TIME_MS)
+            {
+                last_tick = current_tick;
+                phase = 0U;
+            }
+        }
+        else
+        {
+            phase = 0U;
+            current_blink = 0U;
+        }
+    }
+    else
+    {
+        phase = 0U;
+        current_blink = 0U;
+
+
+        /* 2. Ostrzeżenia: miganie symetryczne 1 Hz (500 ms ON / 500 ms OFF) */
+        if (Active_faults.Warnings != 0U)
+        {
+            if ((current_tick - last_tick) >= LED_WARN_TOGGLE_TIME_MS)
+            {
+                last_tick = current_tick;
+                HAL_GPIO_TogglePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin);
+            }
+        }
+        else
+        {
+            /* 3. Praca prawidłowa: świecenie ciągłe */
+            HAL_GPIO_WritePin(STATUS_LED_GPIO_Port, STATUS_LED_Pin, GPIO_PIN_SET);
+        }
+    }
+}
+
+
+void Warning_handler(WarningType_t warning_type)
+{
+	Active_faults.Warnings |= (uint32_t)warning_type;
+}
+
+void Warning_clear_handler(WarningType_t warning_type)
+{
+	Active_faults.Warnings &= ~(uint32_t)warning_type;
+}
+
+void Critical_fault_handler(CritFaultType_t fault_type)
+{
+	// 1. Natychmiastowa blokada sprzętowa bramek GaN (EPC23101)
+	HAL_GPIO_WritePin(GPIOA, HB_EN_n_Pin, GPIO_PIN_SET);
+
+	// 2. Zablokowanie wyjść PWM i wyłączenie przerwania TIM1
+	TIM1->BDTR &= ~TIM_BDTR_MOE;
+	__HAL_TIM_DISABLE_IT(&htim1, TIM_IT_UPDATE);
+
+	// 3. Rejestracja błędu w rejestrze systemowym
+	Active_faults.Critical_faults |= (uint32_t)fault_type;
+}
+
+void Critical_fault_loop(void)
+{
+	for (;;)
+	{
+		Process_Status_LED();
+		//Process_Buzzer(); <- to można ogarnąć tak jak diodę lub połączyć z Process_Status_LED();
+
+		/* Miejsce na przyszłe zadania stanu awaryjnego (np. zgłoszenia UART) */
+	}
 }
 
 
